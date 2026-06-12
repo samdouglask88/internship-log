@@ -294,3 +294,24 @@ Cada entrada documenta o problema, o que foi feito e o que aprendi.
 | Infraestrutura | Docker, GitHub Actions, Nginx, VPS |
 | Registry | GitHub Container Registry (GHCR) |
 | Cache/Filas | Redis |
+
+## DEV-93 — Envio de proposta comercial por e-mail direto no sistema
+
+**Problema:** O botão de enviar proposta por e-mail abria um popup no navegador pedindo para escolher um cliente de e-mail (Outlook, Gmail, etc.), o que causava má experiência e dependia de configuração do computador do usuário.
+
+**O que foi feito:**
+- Criado módulo de e-mail no backend (`api-ultracrm`) com a rota `POST /email/send`
+- Integrado o AWS SES (Simple Email Service) como serviço de envio — o mesmo já usado pelo UltraPonto
+- Criados os arquivos `email.module.ts`, `email.service.ts`, `email.controller.ts` e `send-email.dto.ts` seguindo o padrão NestJS do projeto
+- Instalado o pacote `@aws-sdk/client-ses` e configuradas as credenciais AWS via variáveis de ambiente
+- Criado `email.service.ts` no frontend (`ultracrm-webapp`) usando `apiFetch` para chamar a API
+- Substituído o `window.open(mailto:...)` pela chamada à API de envio direto
+
+**O que aprendi:**
+- O que é AWS SES e como funciona o envio de e-mail via API em vez de cliente de e-mail
+- Como estruturar um módulo NestJS do zero: module, controller, service e DTO
+- O que é um DTO e como os decorators `@IsEmail()`, `@IsString()` validam automaticamente os dados da requisição
+- Como variáveis de ambiente (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`) são lidas no NestJS via `ConfigService`
+- Como criar um service no frontend seguindo o padrão existente do projeto com `apiFetch`
+- A diferença entre `mailto:` (abre cliente de e-mail local) e envio via API (o servidor envia diretamente)
+
