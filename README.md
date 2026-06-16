@@ -315,3 +315,35 @@ Cada entrada documenta o problema, o que foi feito e o que aprendi.
 - Como criar um service no frontend seguindo o padrão existente do projeto com `apiFetch`
 - A diferença entre `mailto:` (abre cliente de e-mail local) e envio via API (o servidor envia diretamente)
 
+- ## DEV-103 — Migrar MySQL para PostgreSQL + Backup diário no S3
+
+**Problema:** A api-ultracrm rodava com MySQL 8.0. A task pedia migração para PostgreSQL e criação de um script de backup diário automático para o S3.
+
+**O que foi feito:**
+
+**Etapa 1 — Migração MySQL → PostgreSQL:**
+- Feito backup de segurança do MySQL antes de qualquer mudança (`mysqldump`)
+- Trocada a dependência `@prisma/adapter-mariadb` por `@prisma/adapter-pg` + `pg` no `package.json`
+- Atualizado `PrismaService` e `seed.ts` para usar `PrismaPg` no lugar de `PrismaMariaDb`
+- Alterado o `schema.prisma` de `provider = "mysql"` para `provider = "postgresql"`
+- Deletadas as migrations antigas (geradas para MySQL) e recriadas para PostgreSQL
+- Adicionado serviço `postgres:16-alpine` no `docker-compose.yml` do servidor
+- Exportados os dados do MySQL via `mysqldump --no-create-info`, convertidas as crases para aspas duplas com `sed`, e importados no PostgreSQL via `psql`
+- Verificada a integridade dos dados comparando contagem de linhas entre MySQL e PostgreSQL nas 6 tabelas
+- Atualizado `docker-compose.yml`, `.env.example` e `CLAUDE.md` para refletir a troca de banco
+- Removida linha `git pull origin master` desnecessária do workflow de CI/CD (o servidor não é um repositório git — o código vai via imagem Docker)
+
+**Etapa 2 — Script de backup diário:**
+- Instalado AWS CLI v2 no servidor via instalador oficial (Ubuntu Noble não tem `awscli` no apt)
+- Criado `/root/backup_ultracrm.sh`: faz `pg_dump` dentro do container, comprime com `gzip` e envia para `s3://ultracrm/backups/` via `aws s3 cp`
+- Testado manualmente — arquivo chegou no S3 com sucesso
+- Agendado via `crontab` para rodar todo dia à 1h da manhã, com log em `/var/log/ultracrm_backup.log`
+
+**O que aprendi:**
+- A diferença entre MySQL e PostgreSQL: MySQL usa crases para identificadores, PostgreSQL usa aspas duplas — por isso o `sed` foi necessário na migração dos dados
+- O que é um driver adapter no Prisma 7 e por que trocar de banco exige trocar o adapter no código
+- Como o `pg_dump` exporta um banco PostgreSQL e por que comprimir com `gzip` antes de enviar para o S3
+- Como o `crontab` funciona: a sintaxe `0 1 * * *` significa "todo dia às 1h da manhã"
+- Por que o servidor não precisa de `git pull` — o código já vai empacotado dentro da imagem Docker publicada no GHCR
+- A importância de verificar a integridade dos dados após uma migração (contar linhas em ambos os bancos)
+- Como o AWS CLI autentica via variáveis de ambiente (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
