@@ -347,3 +347,55 @@ Cada entrada documenta o problema, o que foi feito e o que aprendi.
 - Por que o servidor não precisa de `git pull` — o código já vai empacotado dentro da imagem Docker publicada no GHCR
 - A importância de verificar a integridade dos dados após uma migração (contar linhas em ambos os bancos)
 - Como o AWS CLI autentica via variáveis de ambiente (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`)
+
+- DEV-146 — Importar batidas de REP Evo (EVO AiFace)
+Problema: A importação de batidas de dispositivos EVO AiFace retornava erro 404 — a rota simplesmente não existia. O ZKTeco e o ControliD já tinham endpoint de importação (getalllog), mas o Evo não. Além disso, quando as batidas eram apagadas do sistema e a importação era acionada de novo, nada voltava.
+
+O que foi feito:
+
+Criado o endpoint GET /rep/evo/:serialNumber/getalllog: seguindo o mesmo padrão do endpoint equivalente do ZKTeco, com validação de datas, REP existente, organização (multi-tenant) e modelo.
+
+Injetado o RepWebsocketEvoService no controller: o serviço do WebSocket do Evo não estava disponível no RepController — sem a injeção no construtor, não dava pra disparar o comando.
+
+Corrigida a validação de modelo: a checagem aceitava uma lista errada de modelos (EVO REP C E3, Henry) que nem usam esse fluxo. Trocado para validar um único modelo (RepModelEnum.EvoAiFace), que é o que usa o WebSocket — cada rota valida o seu modelo, sem misturar.
+
+Trocado o comando getnewlog por getalllog: descoberto que o getnewlog só traz os logs novos/não lidos (e os consome). Por isso, apagar as batidas no sistema e reimportar não trazia nada de volta. O getalllog traz todo o histórico guardado na memória do aparelho, permitindo reimportar.
+
+Adicionado filtro por período (fromDate/toDate): no estilo do ZKTeco — o filtro é guardado no estado do cliente e os logs fora da janela são descartados na chegada. Aplicado somente na importação (cmd === 'getalllog'), isolando o fluxo de batida em tempo real (getnewlog), que nunca pode ser filtrado por data.
+
+Extraída a lógica compartilhada para handleLogBatch: os fluxos tempo real e importação passaram a usar o mesmo método privado (filtro + emissão + paginação), diferenciados apenas pelo comando.
+
+Escritos 6 testes unitários cobrindo o filtro (dentro/fora da janela, getnewlog ignorando o filtro, sem filtro, paginação) e o requestAllLogs.
+
+O que aprendi:
+
+A diferença entre getnewlog (logs novos/não lidos, consumidos ao ler) e getalllog (todo o histórico do aparelho) no protocolo do Evo
+Que o getalllog só traz o que foi batido fisicamente naquele aparelho — marcações de outra origem não existem na memória do REP e não têm como ser importadas
+Como funciona o protocolo WebSocket persistente do Evo (porta 7798) vs o PUSH HTTP do ZKTeco
+A diferença entre o fluxo de batida em tempo real e o de importação manual, e por que estado compartilhado entre eles é perigoso (um filtro de importação "vazando" para o tempo real descartaria batidas novas)
+Um bug de fuso horário sutil, achado no code review: comparar new Date() (que usa o fuso do processo) com datas parseadas em America/Bahia funciona na máquina local (-03) mas quebra em produção (container UTC) — a lição de sempre fixar o fuso na comparação de datas
+Como testar métodos privados e mockar dependências (EventEmitter2, WebSocket) em testes unitários com Jest
+
+### **DEV-128 — Testes Unitários — Frontend (WebAPP)**
+Problema: O WebAPP não tinha nenhum teste unitário. O pipeline de CI/CD estava bloqueado por falta de cobertura, e o jest.config.ts tinha o threshold zerado com o comentário "temporário — meta é 80%".
+
+O que foi feito:
+
+Configurado o ambiente de testes: Jest com ts-jest, @testing-library/react v16 e ambiente jsdom
+Criados 78 arquivos .spec.ts cobrindo:
+9 utils (adjustmentUtils, sortItemsUtils, punch, workingTimeUtils, employeeUtils, getNotificationsByUserId, employeeStatusUtils, renderDynamicExtraTypeColumns, saveNotificationInLocalStorage)
+52 hooks — common/, debounce/, holiday/, vacation/, logs/, bridge/, calc/, checkin/, hour-bank/, medical-certificate/, notification/, onCallTimes/, overtime-authorization/, profile/, solicitate-*/, biometric/, employee/, geolocation/, hr-forecasting/, import/, layout/, checkin-mirror/
+Estabelecido padrão de mock para hooks SWR (jest.mock("swr", ...)) e para hooks com useEffect + axios (waitFor)
+Identificado e documentado um bug real: minutesToTime em workingTimeUtils.ts retorna sempre "" — função nunca foi implementada
+
+### **O que aprendi:**
+
+Como o Jest com ts-jest e jsdom simula o ambiente do browser para testar hooks React
+O padrão renderHook + act do @testing-library/react para testar hooks que têm estado
+Por que mockar o módulo SWR inteiro (jest.mock("swr", () => ...)) é necessário: sem o mock, o SWR tenta fazer requisições reais e falha no ambiente de teste
+A diferença entre hooks SWR (resposta síncrona com mock) e hooks com useEffect + axios (assíncronos — precisam de waitFor)
+Por que typeof result.current.fn === "function" é um teste fraco: passa mesmo se a função não faz nada — o ideal é testar o comportamento
+Como navigator.geolocation em jsdom precisa de afterEach para limpar entre testes — sem isso, o "geolocation" in navigator retorna true mas o valor é undefined, causando crash
+Que cobertura de linhas não é a mesma coisa que cobertura de comportamento: 78 specs com mocks SWR aumentam pouco o %statements porque o fetcher nunca executa — a cobertura real exigiria testes de integração ou mocks mais profundos
+Como Boolean("false") retorna true em JavaScript (aprendido no DEV-22, confirmado ao testar lógica de conversão nos utils)
+
