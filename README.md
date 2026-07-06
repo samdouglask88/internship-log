@@ -399,3 +399,23 @@ Como navigator.geolocation em jsdom precisa de afterEach para limpar entre teste
 Que cobertura de linhas não é a mesma coisa que cobertura de comportamento: 78 specs com mocks SWR aumentam pouco o %statements porque o fetcher nunca executa — a cobertura real exigiria testes de integração ou mocks mais profundos
 Como Boolean("false") retorna true em JavaScript (aprendido no DEV-22, confirmado ao testar lógica de conversão nos utils)
 
+
+## DEV-151 — Corrigir duplicação de EmployeeLinks ao editar usuário
+
+**Problema:** Ao editar um colaborador no WebAPP e clicar em Atualizar (mesmo sem mudar nada), o backend criava novos `EmployeeLink` duplicados. A tela passava a mostrar vários departamentos vinculados ao mesmo funcionário, e em produção já havia duplicatas acumuladas.
+
+**Causa raiz (3 camadas):**
+- **Front:** a tela lia os vínculos com `getValues` (que é uma "foto" não-reativa) e o `useState` do `employee-link.tsx` congelava em `[]` antes do fetch assíncrono resolver. Sem `useEffect` de sincronização, o vínculo real nunca chegava ao estado; o `addEmptyLink()` (rodando no render) injetava um vínculo com `id=""`. O form então enviava `employeeLinkIds: [""]`.
+- **Back:** no `user.controller.ts`, o `if (link.employeeLinkId === '')` criava um vínculo novo sem checar se já existia um equivalente.
+- **DB:** o modelo `EmployeeLink` só tinha regra de único em `registration`; nada bloqueava `(userId, departmentId, jobTitleId)` duplicado.
+
+**O que foi feito:**
+
+**Frontend (WebAPP):**
+- `step-3.tsx`: trocado `getValues` por `watch`, tornando as props reativas — quando os dados chegam do servidor, a tela re-renderiza e passa o valor atualizado para baixo
+- `employee-link.tsx`: adicionados `useEffect` que ressincronizam props → state (o estado deixa de ficar congelado no valor inicial vazio) e movido o `addEmptyLink()` do corpo do render para dentro de um `useEffect`
+- `step-1.tsx`: corrigido o alinhamento do array `registrations` (`.filter(Boolean)` → `.map(e => e.registration ?? "")`), que desalinhava os índices quando um vínculo não tinha matrícula
+
+**Backend (Soltech) — defesa em profundidade:**
+- No `for` do `user.controller.ts`, dentro do bloco `employeeLinkId === ''`, adicionadas duas guardas: (1) **skip** — pula a criação se o vínculo não tiver `departmentId` (os "órfãos" que viravam duplicata); (2) **dedup semântico** — busca um vínculo ativo no mesmo `departmentId` e, se achar, reaproveita o id dele, fazendo a decisão original cair no `else` e **atualizar** em vez de criar. A lógica de criar/atualizar não mudou — a guarda só corrige o id antes da decisão
+
