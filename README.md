@@ -419,3 +419,66 @@ Como Boolean("false") retorna true em JavaScript (aprendido no DEV-22, confirmad
 **Backend (Soltech) — defesa em profundidade:**
 - No `for` do `user.controller.ts`, dentro do bloco `employeeLinkId === ''`, adicionadas duas guardas: (1) **skip** — pula a criação se o vínculo não tiver `departmentId` (os "órfãos" que viravam duplicata); (2) **dedup semântico** — busca um vínculo ativo no mesmo `departmentId` e, se achar, reaproveita o id dele, fazendo a decisão original cair no `else` e **atualizar** em vez de criar. A lógica de criar/atualizar não mudou — a guarda só corrige o id antes da decisão
 
+
+DEV-9 — EVO: gravar log de acesso no Histórico
+Problema: Ao passar o rosto num equipamento EVO (AiFace), o aparelho enviava o acesso (sendlog) e o sistema recebia e respondia o ACK, mas não gravava nada em historico_acessos. Confirmado com aparelho físico: vários acessos reconhecidos (meu rosto e o do Cleiton) passavam na catraca, mas a tabela ficava zerada — acessos por EVO sem registro nem auditoria. Diferente do ControliD, que persiste tudo.
+
+O que foi feito:
+
+Criado o método get_equipamento_id_por_serie(numero_serie) no database_service.py para descobrir qual equipamento cadastrado corresponde ao aparelho que enviou o log (casando pelo número de série)
+No handle_send_log (ust_online/websocket_manager.py), adicionado um loop que percorre cada registro do record e chama DatabaseService.salvar_historico_acesso(...), resolvendo o funcionário pelo enrollid (que é o id do funcionário), gravando evento fixo "acesso liberado", host/porta da conexão e o equipamento resolvido pela série
+Espelhado o padrão que o ControliD já usava (controlid_log_handler.py)
+O que aprendi:
+
+Que no protocolo do EVO o aparelho é o cliente que conecta no servidor via WebSocket (porta 7798) e manda reg, sendlog, etc. — diferente do ControliD, onde o sistema faz polling no aparelho
+Que o EVO só reporta acessos reconhecidos (limitação de hardware) — ele não manda rosto desconhecido, enquanto o ControliD salva até "Nome desconhecido"
+Como resolver um funcionário a partir do enrollid que o aparelho envia
+A importância de conferir no banco (DBeaver) se o dado realmente gravou — e que o DBeaver mostra cache antigo, precisa dar F5
+DEV-11 — EVO: envio de funcionários em massa não funcionava
+Problema: O botão "atualizar/enviar funcionários" num equipamento EVO retornava sucesso ("Solicitação enviada"), mas não fazia nada — falso positivo. A rota /api/atualizarFuncionarios só tratava control_id e henry; não existia branch para evo.
+
+O que foi feito:
+
+Adicionado elif fabricante == "evo": na rota atualizarFuncionarios (ust_online/web/routes.py) que percorre DatabaseService.get_funcionarios() e chama EVOService.adicionar_funcionario(int(registration), numero_serie) para cada um
+Ajustado o desempacotamento da config para capturar o numero_serie (antes vinha descartado em _)
+Testado ponta a ponta com aparelho real: os funcionários foram enfileirados e entregues (setuserinfo result:true), aparecendo na lista de Usuários do próprio AiFace
+O que aprendi:
+
+Como um elif faltando pode gerar um "falso sucesso" silencioso — o pior tipo de bug, porque o usuário acha que funcionou
+Como o EVO recebe funcionários via comando setuserinfo enfileirado (mensagem_pendente_evo) e drenado quando o aparelho está conectado
+A diferença entre enfileirar (INSERT na fila) e entregar (enviar pelo WebSocket)
+DEV-14 — /importar_dados retornava 500 sem integração
+Problema: A rota /importar_dados estourava um erro 500 (AttributeError) quando a integração não existia — ao acessar sem ?id= ou com um id inexistente, item vinha None e o código usava item.tipo_entidade direto.
+
+O que foi feito:
+
+Adicionada uma guarda logo após buscar a integração: se item is None, exibe flash("Integração de dados não encontrada.", "danger") e faz redirect para a tela de integrações — no mesmo padrão dos outros flash da função
+O que aprendi:
+
+Que sempre é preciso validar se o objeto retornado do banco é None antes de acessar seus atributos — senão vira 500
+Como o padrão de flash + redirect do Flask trata erros de forma amigável em vez de quebrar a página
+DEV-15 — Tela de Equipamentos: visão "Todos" não listava nada
+Problema: A visão padrão "Todos" da tela /equipamentos mostrava "Nenhum equipamento cadastrado" mesmo havendo equipamentos — eles só apareciam ao clicar num estado no mapa.
+
+Causa raiz: No routes_equipamentos.py, quando nenhum estado era selecionado, nome_uf ficava None, e a condição fazia o sistema chamar listar_equipamentos_por_uf(None) (que retornava 0) em vez de listar_equipamentos().
+
+O que foi feito:
+
+Trocada a condição para verificar if uf diretamente: sem UF selecionada, lista todos os equipamentos; com UF, filtra por estado
+O que aprendi:
+
+Que um bug de "tela vazia" nem sempre é do front — aqui era a lógica da rota decidindo a query errada
+A diferença entre None, string vazia e valor preenchido em condições Python, e como isso muda qual consulta roda
+DEV-16 — EVO: fila acumulava para equipamentos desconectados
+Problema: O método process_pending_messages acessava self.device_connections[sn] sem checar se o aparelho estava conectado. Para um equipamento offline, isso dava KeyError, jogava "Erro ao tratar a mensagem" no log e as mensagens da fila iam acumulando.
+
+O que foi feito:
+
+Trocado o acesso direto por self.device_connections.get(sn) e adicionado um retorno antecipado: se o aparelho não está conectado, sai sem erro e mantém as mensagens na fila para enviar quando ele reconectar (no próximo reg)
+Validado: salvar funcionário com EVO offline não gera mais erro no log; a fila permanece intacta para a drenagem no reconnect
+O que aprendi:
+
+A diferença entre dict[chave] (estoura KeyError se não existe) e dict.get(chave) (retorna None de forma segura)
+Que uma fila pendente deve ser preservada quando o destino está offline — apagar ou falhar perderia dados
+O padrão de "early return" para tratar o caso de indisponibilidade sem poluir o log de erro
+
