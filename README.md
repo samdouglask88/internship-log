@@ -482,3 +482,98 @@ A diferença entre dict[chave] (estoura KeyError se não existe) e dict.get(chav
 Que uma fila pendente deve ser preservada quando o destino está offline — apagar ou falhar perderia dados
 O padrão de "early return" para tratar o caso de indisponibilidade sem poluir o log de erro
 
+DEV-17 — EVO: conexão caindo a cada ~50s
+Problema: O aparelho EVO reconectava sozinho a cada ~50 segundos (fechamento código 1006), gerando dezenas de reconexões por hora. Isso deixava a conexão instável e o log poluído.
+
+O que foi feito:
+
+Identificado que o servidor WebSocket estava configurado com ping_interval=40, ping_timeout=20 — o servidor mandava um PING de protocolo a cada 40s e, sem resposta em 20s, derrubava a conexão
+Descoberto que o AiFace não responde ao PING de protocolo do WebSocket; ele mantém a conexão pelo próprio heartbeat de aplicação (reenviando reg)
+Desativado o ping do servidor (ping_interval=None) — o padrão correto pra esse tipo de aparelho
+O que aprendi:
+
+Que o parâmetro ping_interval do WebSocket serve pra detectar conexões mortas, mas nem todo cliente (aparelho) implementa o protocolo de ping/pong
+Como diagnosticar reconexões periódicas olhando o código de fechamento (1006 = fechamento anormal)
+Que cada fabricante de hardware pode ter seu próprio jeito de "avisar que está vivo", diferente do protocolo padrão
+DEV-30 — EVO: cadastro de visitante quebrava sem janela de validade
+Problema: Ao cadastrar um visitante sem credenciar com data/hora de validade, o envio pro EVO retornava erro 500 (TypeError: NoneType). O visitante salvava no banco, mas o envio falhava — e ao tentar de novo o sistema dizia "já existe visitante com esse nome", confundindo o usuário.
+
+O que foi feito:
+
+Identificado que o código chamava datetime.fromtimestamp(begin_time) sem checar se begin_time existia — quando não havia janela de validade, vinha None e quebrava
+Corrigido para só montar a janela de validade quando begin_time e end_time realmente existirem; sem eles, o visitante é enviado como permanente (mesmo padrão já usado pra funcionários)
+O que aprendi:
+
+Como um erro "silencioso" (500 em background) pode se manifestar como uma mensagem de erro totalmente diferente e enganosa mais tarde (duplicidade de nome)
+A importância de sempre tratar campos opcionais como potencialmente None antes de usar em cálculos de data
+DEV-37 — EVO: botão "Sincronizar Data/Hora" não fazia nada
+Problema: Clicar em "Sincronizar Data/Hora" num equipamento EVO retornava sucesso, mas o relógio do aparelho não mudava — não existia tratamento pra esse fabricante nessa função.
+
+O que foi feito:
+
+Adicionado envio do comando settime (protocolo do EVO) pelo WebSocket
+Descoberto um bug mais profundo no caminho: um arquivo do projeto era usado tanto como script de entrada quanto como módulo importado por outros arquivos — o Python carregava esse arquivo duas vezes, criando uma segunda cópia "fantasma" do servidor WebSocket que nunca tinha nenhum aparelho conectado
+Extraída a parte compartilhada pra um arquivo próprio, garantindo que só existe uma cópia real, não importa quem importe primeiro
+O que aprendi:
+
+Que em Python, rodar um arquivo como script (python arquivo.py) e importar esse mesmo arquivo de outro lugar são coisas com identidades diferentes pro interpretador — pode fazer o mesmo código rodar duas vezes sem perceber
+Como isso pode causar bugs "fantasmas": tudo parece certo no código, mas o comando nunca chega no destino
+Que corrigir a causa raiz de um bug pode acabar destravando outras funcionalidades de graça (a correção acelerou a entrega de outros comandos também)
+DEV-39 — EVO: mostrar status online/offline do equipamento em tempo real
+Problema: A tela de Equipamentos não mostrava corretamente se um aparelho EVO estava online, porque esse fabricante conecta para o servidor (diferente do ControliD, que o sistema consulta ativamente).
+
+O que foi feito:
+
+Implementado um heartbeat de aplicação: a cada 30s o servidor manda um "ping" pro aparelho conectado; qualquer resposta (mesmo um erro de "comando não reconhecido") prova que ele está vivo e renova o status online
+Ao registrar (reg) ou desconectar, o status é atualizado no banco (conexao_ativo, conexao_ultima)
+O que aprendi:
+
+Que "o aparelho está vivo" e "o aparelho entende o meu comando" são coisas diferentes — dava pra usar até uma resposta de erro como prova de vida
+Como implementar um heartbeat de aplicação por cima de um protocolo que não tem um nativo
+DEV-40 — EVO: botão "Limpar Biometrias" não funcionava
+Problema: O botão retornava sucesso, mas não apagava nada no aparelho — a função era escrita só pro protocolo de outro fabricante (Henry).
+
+O que foi feito:
+
+Implementado o comando deleteuser com o código específico de "foto/face" do protocolo EVO — apaga só a biometria, mantém o cadastro
+Testado com aparelho físico: aparelho confirmou a exclusão pros dois funcionários testados
+O que aprendi:
+
+Que "limpar biometria" sempre significa limpar do aparelho, não do sistema — nenhum fabricante mexe no banco próprio nessa ação
+Como um mesmo protocolo pode ter parâmetros diferentes (backupnum) pra indicar qual parte do cadastro apagar
+DEV-41 — Centralizar botões na tela de gerenciamento do equipamento
+Problema: Os botões de ação ficavam em 2 colunas desalinhadas, ficando torto quando sobrava só 1 botão do lado direito.
+
+O que foi feito:
+
+Unificados todos os botões numa coluna só, centralizada, no mesmo padrão já usado no botão "Voltar" da mesma tela
+O que aprendi:
+
+Como pequenos ajustes de layout (Bootstrap grid) resolvem inconsistências visuais sem mexer em nenhuma lógica
+DEV-42 — Visitantes: XSS, crash com foto ausente e mensagem de sucesso quebrada
+Problema: Três bugs achados numa investigação da área de visitantes: (1) a listagem montava HTML sem escapar os dados do usuário, permitindo injeção de script; (2) cadastrar funcionário/visitante sem foto quebrava com erro interno em 4 pontos do código; (3) uma tela mostrava um dicionário Python cru na mensagem de sucesso.
+
+O que foi feito:
+
+Escapados os campos do usuário (nome, classe, empresa) com markupsafe.escape() antes de montar o HTML
+Aplicado um guard (if x else "") nos 4 pontos que acessavam dado de foto sem checar se existia
+Corrigida a chamada de mensagem de sucesso pra usar o texto certo, não o dicionário inteiro
+O que aprendi:
+
+Como um XSS armazenado acontece: dado do usuário vira HTML sem passar por escape
+Que a mesma causa (uma validação desativada) pode deixar um bug "adormecido" alcançável em vários lugares diferentes do código ao mesmo tempo
+A importância de conferir se duas funções "irmãs" (que fazem quase a mesma coisa) retornam o dado no mesmo formato
+
+DEV-43 — Visitante: apagar foto ao dar baixa, mantendo o cadastro
+Problema: Quando um visitante saía (dava baixa no credenciamento), a foto dele continuava guardada no sistema indefinidamente — mesmo depois de ele ir embora.
+
+O que foi feito:
+
+Ao dar baixa num credenciamento de visitante, a foto salva no banco é apagada (foto = None), mantendo nome, CPF e demais dados do cadastro intactos — assim, na próxima visita, é preciso capturar uma foto nova
+O que aprendi:
+
+Como fazer uma limpeza de dado sensível "cirúrgica" (só um campo) sem afetar o resto do registro
+Que o ponto certo de um sistema pra "desligar" um comportamento é encontrar o evento de negócio que já existe (aqui, o "dar baixa") em vez de criar um mecanismo novo
+E sobre a main: fica pra quando você decidir dar esse passo — não fiz nada ainda, só te perguntei antes.
+
+
